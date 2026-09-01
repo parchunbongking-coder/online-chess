@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>실시간 온라인 체스 게임 (P2P)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <!-- Chessboard.js CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.css" />
+    <!-- jQuery & Chess.js & Chessboard.js & PeerJS -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"></script>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <style>
+        .highlight-white { box-shadow: inset 0 0 3px 3px yellow; }
+        .highlight-black { box-shadow: inset 0 0 3px 3px yellow; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col items-center justify-center p-4 font-sans">
+
+    <div class="max-w-4xl w-full bg-slate-800 rounded-2xl shadow-2xl p-6 flex flex-col md:flex-row gap-6">
+        
+        <!-- 왼쪽: 게임 보드 및 정보 -->
+        <div class="flex-1 flex flex-col items-center">
+            <h1 class="text-2xl font-bold mb-4 text-indigo-400 flex items-center gap-2">
+                ♟️ 실시간 온라인 체스 (Vibe)
+            </h1>
+            
+            <!-- 상태 창 -->
+            <div id="status-panel" class="w-full bg-slate-700/50 border border-slate-600 rounded-lg p-3 mb-4 text-center text-sm">
+                <span id="game-status" class="font-medium text-amber-300">내 Peer ID를 생성하는 중...</span>
+            </div>
+
+            <!-- 체스판 -->
+            <div class="w-full max-w-[400px] aspect-square bg-slate-700 p-2 rounded-xl shadow-lg">
+                <div id="my-board" class="w-full h-full"></div>
+            </div>
+            
+            <!-- 턴 표시기 -->
+            <div class="mt-4 text-lg font-semibold flex gap-4">
+                <div>내 색상: <span id="my-color" class="text-indigo-300">-</span></div>
+                <div>차례: <span id="turn-display" class="text-emerald-400">백 (White)</span></div>
+            </div>
+        </div>
+
+        <!-- 오른쪽: 멀티플레이어 연결 설정 및 채팅 -->
+        <div class="w-full md:w-80 flex flex-col gap-4 border-t md:border-t-0 md:border-l border-slate-700 pt-4 md:pt-0 md:pl-6">
+            
+            <!-- 연결 관리 구역 -->
+            <div class="bg-slate-700/30 p-4 rounded-xl border border-slate-700">
+                <h2 class="text-sm font-semibold text-slate-400 mb-2 uppercase tracking-wider">1. 내 링크 공유하기</h2>
+                <div class="flex gap-2 mb-3">
+                    <input type="text" id="my-id-input" readonly class="bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs flex-1 text-slate-400 focus:outline-none" value="로딩 중...">
+                    <button id="copy-btn" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1 rounded font-medium transition">복사</button>
+                </div>
+
+                <h2 class="text-sm font-semibold text-slate-400 mb-2 uppercase tracking-wider">2. 상대방 링크로 연결</h2>
+                <div class="flex flex-col gap-2">
+                    <input type="text" id="peer-id-input" placeholder="상대방의 Peer ID 입력" class="bg-slate-900 border border-slate-600 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-indigo-500 text-white">
+                    <button id="connect-btn" class="bg-emerald-600 hover:bg-emerald-500 text-white text-sm py-1.5 rounded font-medium transition">게임 연결하기</button>
+                </div>
+            </div>
+
+            <!-- 대화창 / 로그 -->
+            <div class="flex-1 flex flex-col bg-slate-900/50 border border-slate-700 rounded-xl p-3 min-h-[180px]">
+                <h3 class="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wider">게임 로그 및 채팅</h3>
+                <div id="chat-box" class="flex-1 text-xs overflow-y-auto space-y-1 pr-1 max-h-[140px] text-slate-300">
+                    <p class="text-slate-500">* 상대방과 연결되면 채팅을 주고받을 수 있습니다.</p>
+                </div>
+                <div class="flex gap-1 mt-2">
+                    <input type="text" id="chat-input" placeholder="메시지 입력..." class="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs flex-1 focus:outline-none focus:border-indigo-500 text-white" disabled>
+                    <button id="send-btn" class="bg-slate-700 text-white text-xs px-3 py-1 rounded" disabled>전송</button>
+                </div>
+            </div>
+            
+            <button id="restart-btn" class="w-full bg-rose-600/20 hover:bg-rose-600 border border-rose-500/50 text-rose-200 text-xs py-2 rounded transition font-medium">
+                게임 초기화 (다시 시작)
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // 게임 상태 및 외부 라이브러리 객체 생성
+        let board = null;
+        const game = new Chess();
+        let peer = null;
+        let conn = null;
+        let myColor = null; // 'w' 또는 'b'
+        
+        const $gameStatus = $('#game-status');
+        const $myColorSpan = $('#my-color');
+        const $turnDisplay = $('#turn-display');
+        const $chatBox = $('#chat-box');
+
+        // 1. PeerJS 초기화 (서버 없이 브라우저간 direct P2P 연결)
+        function initPeer() {
+            peer = new Peer();
+
+            peer.on('open', function(id) {
+                $('#my-id-input').val(id);
+                $gameStatus.text('대기 중: 상대방에게 본인의 ID를 전달하거나 상대방 ID를 입력하세요.');
+                
+                // URL 파라미터에 join ID가 있으면 자동 연결 시도
+                const urlParams = new URLSearchParams(window.location.search);
+                const joinId = urlParams.get('join');
+                if (joinId) {
+                    $('#peer-id-input').val(joinId);
+                    connectToPeer(joinId);
+                }
+            });
+
+            // 상대방이 나에게 연결을 시도했을 때 (내가 방장이 됨 -> 백돌)
+            peer.on('connection', function(connection) {
+                if (conn) {
+                    connection.close(); // 이미 연결된 상태면 거절
+                    return;
+                }
+                conn = connection;
+                myColor = 'w'; // 먼저 기다린 사람이 백돌
+                setupConnection();
+                
+                // 상대방에게 흑돌임을 알림
+                conn.send({ type: 'init', color: 'b' });
+                startGame();
+            });
+
+            peer.on('error', function(err) {
+                logMessage('에러 발생: ' + err.type);
+                $gameStatus.text('연결 오류가 발생했습니다.');
+            });
+        }
+
+        // 2. 내가 상대방에게 연결 요청할 때 (내가 참가자 -> 흑돌)
+        function connectToPeer(peerId) {
+            if (!peerId.trim()) return;
+            $gameStatus.text('상대방에게 연결을 시도하는 중...');
+            conn = peer.connect(peerId);
+            
+            conn.on('open', function() {
+                // 백엔드 통신 없이 연결 성공시 데이터 수신 준비
+                setupConnection();
+            });
+        }
+
+        // 3. P2P 데이터 수신 이벤트 바인딩
+        function setupConnection() {
+            $gameStatus.text('상대방과 성공적으로 연결되었습니다!');
+            $('#chat-input').prop('disabled', false);
+            $('#send-btn').prop('disabled', false);
+
+            conn.on('data', function(data) {
+                if (data.type === 'init') {
+                    myColor = data.color;
+                    startGame();
+                } else if (data.type === 'move') {
+                    game.move(data.move);
+                    board.position(game.fen());
+                    updateStatus();
+                } else if (data.type === 'chat') {
+                    logMessage('상대방: ' + data.msg);
+                } else if (data.type === 'restart') {
+                    game.reset();
+                    board.start();
+                    updateStatus();
+                    logMessage('📢 상대방이 게임을 초기화했습니다.');
+                }
+            });
+
+            conn.on('close', function() {
+                $gameStatus.text('상대방과의 연결이 끊어졌습니다.');
+                $('#chat-input').prop('disabled', true);
+                $('#send-btn').prop('disabled', true);
+                conn = null;
+            });
+        }
+
+        // 4. 체스 보드 로직 제어 (Chessboard.js)
+        function onDragStart(source, piece, position, orientation) {
+            // 게임 오버 상태거나, 내 턴이 아니거나, 내 색깔의 기물이 아니면 드래그 방지
+            if (game.game_over()) return false;
+            if (!myColor || game.turn() !== myColor) return false;
+            if ((myColor === 'w' && piece.search(/^b/) !== -1) ||
+                (myColor === 'b' && piece.search(/^w/) !== -1)) {
+                return false;
+            }
+        }
+
+        function onDrop(source, target) {
+            // 움직임 검증
+            let move = game.move({
+                from: source,
+                to: target,
+                promotion: 'q' // 폰이 끝에 닿으면 항상 퀸으로 프로모션 (단순화)
+            });
+
+            // 불법적인 움직임이면 제자리로
+            if (move === null) return 'snapback';
+
+            // 정상적인 움직임이면 상대방에게 전송
+            if (conn && conn.open) {
+                conn.send({
+                    type: 'move',
+                    move: { from: source, to: target, promotion: 'q' }
+                });
+            }
+            updateStatus();
+        }
+
+        function onSnapEnd() {
+            board.position(game.fen());
+        }
+
+        // 상태 업데이트 및 화면 표시
+        function updateStatus() {
+            let status = '';
+            let moveColor = (game.turn() === 'w') ? '백 (White)' : '흑 (Black)';
+
+            if (game.in_checkmate()) {
+                status = '게임 종료: ' + moveColor + '가 체크메이트(패배) 당했습니다.';
+            } else if (game.in_draw()) {
+                status = '게임 종료: 무승부(Draw)입니다.';
+            } else {
+                status = moveColor + '의 차례입니다.';
+                if (game.in_check()) {
+                    status += ' (체크!)';
+                }
+            }
+
+            $gameStatus.text(status);
+            $turnDisplay.text(moveColor);
+        }
+
+        // 게임 시작 시 보드 렌더링 및 방향 설정
+        function startGame() {
+            $myColorSpan.text(myColor === 'w' ? '백 (White)' : '흑 (Black)');
+            
+            const config = {
+                draggable: true,
+                position: 'start',
+                onDragStart: onDragStart,
+                onDrop: onDrop,
+                onSnapEnd: onSnapEnd,
+                orientation: myColor === 'w' ? 'white' : 'black',
+                pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
+            };
+            
+            board = Chessboard('my-board', config);
+            updateStatus();
+            logMessage('♟️ 게임이 시작되었습니다! 당신은 ' + (myColor === 'w' ? '백돌' : '흑돌') + '입니다.');
+        }
+
+        // 메시지 로그 출력용
+        function logMessage(msg) {
+            $chatBox.append(`<p class="py-0.5">${msg}</p>`);
+            $chatBox.scrollTop($chatBox[0].scrollHeight);
+        }
+
+        // 이벤트 리스너 바인딩
+        $('#copy-btn').on('click', function() {
+            const myId = $('#my-id-input').val();
+            if(!myId || myId === '로딩 중...') return;
+            
+            // 공유하기 편하도록 URL 생성
+            const shareUrl = window.location.origin + window.location.pathname + '?join=' + myId;
+            
+            navigator.clipboard.writeText(shareUrl).then(() => {
+                alert('초대 링크가 클립보드에 복사되었습니다! 상대방에게 링크를 보내 바로 접속하게 하세요.');
+            });
+        });
+
+        $('#connect-btn').on('click', function() {
+            const targetId = $('#peer-id-input').val().trim();
+            // 만약 URL 형태 전체를 넣었을 경우 파라미터 추출 지원
+            if (targetId.includes('?join=')) {
+                const parsedId = new URL(targetId).searchParams.get('join');
+                connectToPeer(parsedId);
+            } else {
+                connectToPeer(targetId);
+            }
+        });
+
+        function sendChatMessage() {
+            const msg = $('#chat-input').val().trim();
+            if (!msg || !conn) return;
+
+            conn.send({ type: 'chat', msg: msg });
+            logMessage('나: ' + msg);
+            $('#chat-input').val('');
+        }
+
+        $('#send-btn').on('click', sendChatMessage);
+        $('#chat-input').on('keypress', function(e) {
+            if (e.which === 13) sendChatMessage();
+        });
+
+        $('#restart-btn').on('click', function() {
+            if (confirm('게임을 정말 초기화하시겠습니까?')) {
+                game.reset();
+                if (board) board.start();
+                updateStatus();
+                logMessage('📢 내가 게임을 초기화했습니다.');
+                if (conn && conn.open) {
+                    conn.send({ type: 'restart' });
+                }
+            }
+        });
+
+        // 웹페이지 로드 시 초기화 실행
+        $(document).ready(function() {
+            initPeer();
+            // 기본 빈 보드 렌더링
+            board = Chessboard('my-board', {
+                position: 'start',
+                pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
+            });
+        });
+    </script>
+</body>
+</html>
